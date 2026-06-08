@@ -28,7 +28,7 @@ from app.schemas.extraction import (
     ExtractionResponse,
     ValidationResult,
 )
-from app.services.mindee_extraction import LLMError, mindee_extraction_service as extraction_service
+from app.services.extraction import LLMError, extraction_service
 from app.services.ocr import ocr_service
 from app.services.storage import storage_service
 from app.services.validation import (
@@ -150,7 +150,7 @@ async def _run_extraction_pipeline(
     ocr_text = ocr_service.extract_text(raw, mime_type)
 
     try:
-        extracted = await extraction_service.extract(raw, mime_type=mime_type, hints=doc.filename)
+        extracted = await extraction_service.extract(ocr_text, hints=doc.filename)
     except LLMError as exc:
         raise RuntimeError(f"llm_extraction_failed: {exc}") from exc
 

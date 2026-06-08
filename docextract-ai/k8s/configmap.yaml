@@ -10,7 +10,7 @@ data:
   S3_REGION: "us-east-1"
   S3_BUCKET: "docextract"
   OCR_ENGINE: "paddle"
-  LLM_MODEL: "gemini-2.0-flash"
+  LLM_MODEL: "gemini-2.5-flash"
   MAX_UPLOAD_MB: "25"
   RATE_LIMIT_DEFAULT: "60/minute"
   WEBHOOK_TIMEOUT_SECONDS: "10"

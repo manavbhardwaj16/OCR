@@ -10,8 +10,21 @@ from __future__ import annotations
 import re
 
 SYSTEM_PROMPT = (
-    "You are a document extraction engine for Indian GST documents. "
-    "Extract ALL fields with confidence scores. Return ONLY valid JSON."
+    "You are DocExtract AI — a specialized extraction engine for Indian GST "
+    "documents. You extract structured data with field-level confidence scores.\n"
+    "Rules you ALWAYS follow:\n"
+    "1. Return ONLY a valid JSON object. No markdown, no prose, no backticks.\n"
+    "2. For every field, return {value: string, confidence: float 0-1}.\n"
+    "3. confidence reflects: OCR clarity x field presence certainty x value validity.\n"
+    "4. GSTIN is always 15 characters, uppercase alphanumeric. If extracted value "
+    "is not 15 chars, set confidence < 0.3.\n"
+    "5. Amounts are numeric strings without currency symbols (e.g. '4366.00').\n"
+    "6. Dates in YYYY-MM-DD format where possible.\n"
+    "7. If a field is not present in the document, return {value: '', confidence: 0.0}.\n"
+    "8. NEVER fabricate values. Low confidence + empty value is always better than "
+    "a hallucinated value.\n"
+    "9. For line items, extract every row in the table. Do not truncate.\n"
+    "10. HSN codes are 4-8 digit numeric strings."
 )
 
 USER_PROMPT_TEMPLATE = (
@@ -25,6 +38,7 @@ Schema (return EXACTLY this shape — empty string + 0.0 confidence if missing):
 {
   "document_type": "TAX_INVOICE|DELIVERY_CHALLAN|PACKING_LIST|PURCHASE_ORDER|CREDIT_NOTE|DEBIT_NOTE|EWAY_BILL|UNKNOWN",
   "overall_confidence": 0.0,
+  "amounts_reconciled_flag": true,
   "data": {
     "vendor_name": {"value": "", "confidence": 0.0},
     "vendor_gstin": {"value": "", "confidence": 0.0},
@@ -55,6 +69,28 @@ Rules:
 - GSTIN: 15 chars, uppercase.
 - confidence in [0,1] reflecting OCR clarity + field certainty.
 - Return ONLY the JSON object. No prose, no markdown fences.
+
+CONFIDENCE CALIBRATION GUIDE:
+- 0.95-1.0: Field clearly printed, unambiguous, no OCR noise
+- 0.80-0.94: Field present but minor formatting variation or partial OCR noise
+- 0.60-0.79: Field inferred from context or significant OCR degradation
+- 0.30-0.59: Field uncertain, multiple possible interpretations
+- 0.00-0.29: Field absent, illegible, or GSTIN length mismatch
+
+AMOUNT RECONCILIATION INSTRUCTION:
+Before returning JSON, mentally verify: subtotal + cgst + sgst + igst = grand_total (+/- 1).
+If amounts do not reconcile, recheck your extraction and adjust values.
+If they still don't reconcile after recheck, set amounts_reconciled_flag: false in the root object.
+
+FEW-SHOT EXAMPLES FOR GSTIN:
+Input: '27AABCU9603R1ZX' -> {"value": "27AABCU9603R1ZX", "confidence": 0.98}
+Input: '27AABCU9603R1Z' (14 chars) -> {"value": "27AABCU9603R1Z", "confidence": 0.15}
+Input: 'GSTIN: 29AAA' (partial) -> {"value": "", "confidence": 0.0}
+
+FEW-SHOT EXAMPLES FOR AMOUNTS:
+Input: 'Rs.4,366.00' -> {"value": "4366.00", "confidence": 0.99}
+Input: 'Rs. 4366/-' -> {"value": "4366.00", "confidence": 0.95}
+Input: unclear smudge -> {"value": "", "confidence": 0.0}
 """.strip()
 
 
@@ -78,6 +114,16 @@ Document-type specialization — E-WAY BILL:
 - DO NOT extract Vehicle Number, Transporter ID, Mode, Distance, or Valid-Upto
   into the standard schema — they have no mapping (would lower data quality).
 - If a per-item HSN/qty table is present, populate "items"; otherwise return [].
+
+FEW-SHOT EXAMPLES (E-WAY BILL):
+Example 1 — "EWB No: 121000123456 / Generated: 2026-03-14 / GSTIN of Generator:
+27AABCU9603R1ZX / To GSTIN: 29AAACG1234A1ZB / Invoice Value: Rs.118000.00"
+=> document_type: "EWAY_BILL", document_number.value: "121000123456",
+   document_date.value: "2026-03-14", vendor_gstin.value: "27AABCU9603R1ZX",
+   customer_gstin.value: "29AAACG1234A1ZB", grand_total.value: "118000.00".
+Example 2 — Document shows ONLY "Total Value: 250000" with no CGST/SGST/IGST
+breakdown printed. => grand_total.value: "250000.00" (confidence ~0.9),
+cgst/sgst/igst values: "" with confidence: 0.0. Never invent the tax split.
 """.strip()
 
 DELIVERY_CHALLAN_HINT = """
@@ -97,6 +143,18 @@ Document-type specialization — DELIVERY CHALLAN:
 - Common challan-specific labels: "Despatched through", "Mode of Transport",
   "Place of Supply", "Reason for Transportation" — these don't map to the
   schema; ignore them.
+
+FEW-SHOT EXAMPLES (DELIVERY CHALLAN):
+Example 1 — "Delivery Challan No. DC/2026/045 / Date: 14-Mar-2026 / Consignor:
+Acme Industries GSTIN 27AABCU9603R1ZX / Consignee: Beta Traders GSTIN
+27BBBCE5555F1ZY / Value of goods: 42500"
+=> document_type: "DELIVERY_CHALLAN", document_number.value: "DC/2026/045",
+   document_date.value: "2026-03-14", vendor_gstin.value: "27AABCU9603R1ZX",
+   customer_gstin.value: "27BBBCE5555F1ZY", subtotal.value: "42500.00",
+   grand_total.value: "42500.00", cgst/sgst/igst.value: "" with confidence 0.0.
+Example 2 — Challan lists 3 items with HSN 8517 each. Return items[] array
+with all 3 rows; never collapse or summarise. If qty/rate not printed, return
+{"value":"","confidence":0.0} for those subfields.
 """.strip()
 
 TAX_INVOICE_HINT = """
@@ -105,7 +163,20 @@ Document-type specialization — TAX INVOICE:
 - Both vendor (supplier) and customer (recipient) sections are usually labelled
   explicitly. Always look for "Bill To" / "Ship To" for the customer block.
 - All tax fields (CGST, SGST, IGST) should reconcile against subtotal and
-  grand_total within ±1 rupee. Prioritise extracting them accurately.
+  grand_total within +/- 1 rupee. Prioritise extracting them accurately.
+
+FEW-SHOT EXAMPLES (TAX INVOICE):
+Example 1 — "Tax Invoice / Invoice No: INV-2026-0142 / Date: 12/03/2026 /
+Supplier: Acme Industries GSTIN 27AABCU9603R1ZX / Bill To: Gamma Ltd GSTIN
+29AAACG1234A1ZB / Subtotal 100000 + CGST 9000 + SGST 9000 = Total 118000"
+=> document_type: "TAX_INVOICE", document_number.value: "INV-2026-0142",
+   document_date.value: "2026-03-12", vendor_gstin.value: "27AABCU9603R1ZX",
+   customer_gstin.value: "29AAACG1234A1ZB", subtotal.value: "100000.00",
+   cgst.value: "9000.00", sgst.value: "9000.00", igst.value: "",
+   grand_total.value: "118000.00", amounts_reconciled_flag: true.
+Example 2 — Inter-state invoice with only IGST (no CGST/SGST). Subtotal 50000
++ IGST 9000 = 59000. => cgst.value: "" (conf 0.0), sgst.value: "" (conf 0.0),
+igst.value: "9000.00", grand_total.value: "59000.00", reconciled true.
 """.strip()
 
 
@@ -190,7 +261,7 @@ CORRECTION_PROMPT_TEMPLATE = (
     "Your previous extraction had validation errors:\n{errors}\n\n"
     "Re-examine the OCR text and return a corrected JSON object "
     "in the same schema. Focus on reconciling amounts: "
-    "subtotal + cgst + sgst + igst should equal grand_total (±1).\n\n"
+    "subtotal + cgst + sgst + igst should equal grand_total (+/- 1).\n\n"
     "OCR Text:\n{ocr_text}\n\n"
     "Return ONLY the corrected JSON."
 )

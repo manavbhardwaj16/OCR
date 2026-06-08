@@ -10,12 +10,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.security import decode_access_token, verify_api_key
+from app.core.logging import get_logger
+from app.core.security import api_key_prefix, decode_access_token, verify_api_key
 from app.models.api_key import APIKey
 from app.models.tenant import Tenant
 from app.models.user import User, UserRole
 
 bearer = HTTPBearer(auto_error=False)
+log = get_logger("auth")
 
 
 def _unauthorized(detail: str = "unauthorized") -> HTTPException:
@@ -64,10 +66,60 @@ def _resolve_jwt(token: str, db: Session) -> Principal:
 
 
 def _resolve_api_key(raw_key: str, db: Session) -> Principal:
-    """Try every active key — bcrypt-hashed so brute compare. Skip revoked keys."""
-    keys = db.execute(select(APIKey).where(APIKey.revoked_at.is_(None))).scalars().all()
-    for key in keys:
+    """Resolve an API key in O(1) via the indexed ``key_prefix`` column.
+
+    Only keys whose plaintext prefix matches the request key are bcrypt-compared,
+    so the auth cost no longer scales with the total number of keys in the system.
+    Legacy keys (created before the ``key_prefix`` column was added) have NULL
+    prefix and fall back to a full scan with a warning; they auto-heal on rotation.
+    """
+    prefix = api_key_prefix(raw_key)
+
+    # Fast path — indexed lookup on (key_prefix, revoked_at IS NULL).
+    if prefix:
+        candidates = (
+            db.execute(
+                select(APIKey).where(
+                    APIKey.key_prefix == prefix,
+                    APIKey.revoked_at.is_(None),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for key in candidates:
+            if verify_api_key(raw_key, key.key_hash):
+                key.last_used = datetime.now(timezone.utc)
+                db.add(key)
+                db.commit()
+                return Principal(
+                    tenant_id=key.tenant_id,
+                    user_id=None,
+                    role=UserRole.MEMBER,
+                    auth_type="api_key",
+                )
+
+    # Legacy slow path: rows with NULL key_prefix (pre-migration).
+    legacy = (
+        db.execute(
+            select(APIKey).where(
+                APIKey.revoked_at.is_(None),
+                APIKey.key_prefix.is_(None),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for key in legacy:
         if verify_api_key(raw_key, key.key_hash):
+            log.warning(
+                "legacy_api_key_full_scan",
+                api_key_id=str(key.id),
+                tenant_id=str(key.tenant_id),
+                hint="rotate_this_key_to_enable_fast_lookup",
+            )
+            # Auto-heal: backfill the prefix so future lookups are fast.
+            key.key_prefix = prefix
             key.last_used = datetime.now(timezone.utc)
             db.add(key)
             db.commit()

@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.rate_limit import limiter
 from app.core.security import (
+    api_key_prefix,
     create_access_token,
     generate_api_key,
     hash_api_key,
@@ -76,6 +77,7 @@ def create_api_key(
     entry = APIKey(
         tenant_id=principal.tenant_id,
         key_hash=hash_api_key(raw),
+        key_prefix=api_key_prefix(raw),
         name=payload.name,
         rate_limit_per_minute=payload.rate_limit_per_minute,
     )
@@ -122,6 +124,7 @@ def rotate_api_key(
         raise HTTPException(409, "api_key_revoked")
     raw = generate_api_key()
     key.key_hash = hash_api_key(raw)
+    key.key_prefix = api_key_prefix(raw)
     key.last_used = None
     now = datetime.now(timezone.utc)
     db.commit()

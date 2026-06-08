@@ -30,9 +30,25 @@ class Settings(BaseSettings):
     s3_secret_key: str = Field(...)
     s3_region: str = Field(default="us-east-1")
 
+    # Local filesystem storage fallback (dev only — set STORAGE_MODE=local)
+    storage_mode: str = Field(default="s3")  # "s3" | "local"
+    local_storage_dir: str = Field(default="/tmp/docextract-storage")
+
+    # SMTP (verification + welcome emails). When SMTP_HOST is empty, emails are
+    # logged to stdout in dev mode.
+    smtp_host: str = Field(default="")
+    smtp_port: int = Field(default=587)
+    smtp_user: str = Field(default="")
+    smtp_password: str = Field(default="")
+    smtp_from_email: str = Field(default="noreply@docextract.ai")
+    app_base_url: str = Field(default="http://localhost:3000")
+
+    # Admin gating — only users from this tenant can access /admin/* routes
+    admin_tenant_id: str = Field(default="")
+
     # LLM (Google Gemini)
     gemini_api_key: str = Field(default="")
-    llm_model: str = Field(default="gemini-2.0-flash")
+    llm_model: str = Field(default="gemini-2.5-flash")
 
     # Auth
     jwt_secret: str = Field(...)

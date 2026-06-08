@@ -16,6 +16,13 @@ class APIKey(UUIDPKMixin, TimestampMixin, Base):
         GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
     )
     key_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    # Plaintext prefix of the raw API key (first 16 chars). Indexed for O(1)
+    # auth lookups so we only bcrypt-compare a handful of candidate rows. Legacy
+    # rows created before this column was added remain NULL and fall back to
+    # the full-scan slow path until they are rotated.
+    key_prefix: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, index=True
+    )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     last_used: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

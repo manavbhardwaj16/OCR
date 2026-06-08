@@ -39,6 +39,12 @@ def generate_api_key() -> str:
     return f"dx_{secrets.token_urlsafe(32)}"
 
 
+def api_key_prefix(raw_key: str) -> str:
+    """Return the first 16 chars of a raw API key — used as an indexed
+    lookup tuple alongside the bcrypt-hashed full key for fast auth."""
+    return (raw_key or "")[:16]
+
+
 def create_access_token(
     subject: str,
     tenant_id: str,
