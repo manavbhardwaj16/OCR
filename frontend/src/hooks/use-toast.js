@@ -37,6 +37,27 @@ const addToRemoveQueue = (toastId) => {
   toastTimeouts.set(toastId, timeout)
 }
 
+// Helper to keep the main reducer body under the complexity threshold.
+function handleDismissToast(state, action) {
+  const { toastId } = action
+
+  if (toastId) {
+    addToRemoveQueue(toastId)
+  } else {
+    state.toasts.forEach((toast) => {
+      addToRemoveQueue(toast.id)
+    })
+  }
+
+  return {
+    ...state,
+    toasts: state.toasts.map((t) =>
+      t.id === toastId || toastId === undefined
+        ? { ...t, open: false }
+        : t),
+  }
+}
+
 export const reducer = (state, action) => {
   switch (action.type) {
     case "ADD_TOAST":
@@ -52,30 +73,9 @@ export const reducer = (state, action) => {
           t.id === action.toast.id ? { ...t, ...action.toast } : t),
       };
 
-    case "DISMISS_TOAST": {
-      const { toastId } = action
+    case "DISMISS_TOAST":
+      return handleDismissToast(state, action);
 
-      // ! Side effects ! - This could be extracted into a dismissToast() action,
-      // but I'll keep it here for simplicity
-      if (toastId) {
-        addToRemoveQueue(toastId)
-      } else {
-        state.toasts.forEach((toast) => {
-          addToRemoveQueue(toast.id)
-        })
-      }
-
-      return {
-        ...state,
-        toasts: state.toasts.map((t) =>
-          t.id === toastId || toastId === undefined
-            ? {
-                ...t,
-                open: false,
-              }
-            : t),
-      };
-    }
     case "REMOVE_TOAST":
       if (action.toastId === undefined) {
         return {
@@ -135,6 +135,11 @@ function toast({
 function useToast() {
   const [state, setState] = React.useState(memoryState)
 
+  // Subscribe once on mount, unsubscribe on unmount. ``setState`` from
+  // ``useState`` is stable across renders, and ``listeners`` is module-scope,
+  // so neither belongs in the dependency array — an empty deps array is the
+  // correct, single-fire semantic here.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   React.useEffect(() => {
     listeners.push(setState)
     return () => {
@@ -143,7 +148,7 @@ function useToast() {
         listeners.splice(index, 1)
       }
     };
-  }, [state])
+  }, [])
 
   return {
     ...state,
